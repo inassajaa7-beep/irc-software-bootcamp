@@ -7,7 +7,7 @@ Buat sebuah skrip Python menggunakan DroneKit yang mensimulasikan penerbangan dr
 Skrip minimal harus mengimplementasikan alur berikut:
 
 ```
-ARM -> TAKEOFF -> MAJU -> MUNDUR -> LANDING
+ARM -> TAKEOFF -> MAJU -> HOVER -> MUNDUR -> LANDING
 ```
 
 Kamu bebas menambahkan kreativitas seperti pola terbang berbeda (zigzag, kotak, segitiga), hover LOITER di beberapa titik, variasi ketinggian di berbagai waypoint, maupun kombinasi arah yang lebih kompleks.

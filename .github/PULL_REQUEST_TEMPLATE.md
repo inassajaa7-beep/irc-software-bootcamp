@@ -1,8 +1,7 @@
 ## Informasi Pengumpulan Tugas
 
 **Nama Lengkap:**
-**NIM / ID Peserta:**
-**Divisi:** VTOL - Sub-divisi Software
+**NIM:**
 
 ---
 

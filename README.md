@@ -77,12 +77,12 @@ Aktivasi virtual environment:
 Install library yang dibutuhkan:
 
 ```bash
-pip install dronekit pymavlink
+pip install dronekit pymavlink future
 ```
 
 Verifikasi instalasi:
 ```bash
-python -c "import dronekit; print('DroneKit OK')"
+python -c "import collections, collections.abc; collections.MutableMapping = collections.abc.MutableMapping; collections.Mapping = collections.abc.Mapping; collections.Iterable = collections.abc.Iterable; import dronekit; print('DroneKit OK')"
 ```
 
 ### 3. Mission Planner
