@@ -43,10 +43,10 @@ Jelaskan kode kamu dengan menjawab pertanyaan-pertanyaan berikut:
 4. Tantangan apa yang kamu temui dan bagaimana cara mengatasinya?
 5. Apa yang ingin kamu kembangkan jika ada waktu lebih?
 
-### Screenshots / Video (Wajib)
+### Screenshots dan Video (Wajib)
 
 - Minimal satu screenshot Mission Planner yang menunjukkan drone bergerak
-- Jika merekam video, upload ke Google Drive atau YouTube dan cantumkan linknya di dalam `explanation.md`
+- Rekam layar split antara Mission Planner dan Terminal, upload ke Google Drive atau YouTube dan cantumkan linknya di dalam `explanation.md`
 
 ---
 
