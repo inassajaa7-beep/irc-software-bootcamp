@@ -17,7 +17,7 @@ import time
 import math
 from dronekit import connect, VehicleMode, LocationGlobalRelative
 
-# ---- Helper functions (sama pola dengan contoh misi lain) ----
+# ---- Helper functions  ----
 
 def switch_mode(vehicle, mode_name, timeout=10):
     vehicle.mode = VehicleMode(mode_name)

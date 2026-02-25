@@ -1,177 +1,713 @@
-"""
-04_loiter_mission.py
---------------------
-Misi dengan LOITER di setiap titik waypoint.
-Drone terbang dalam pola segitiga dan hover di setiap sudut.
-
-Pola misi:
-  Start/Landing
-      |
-      A
-     / \
-    B   C
-
-  A = puncak segitiga (30m Utara)
-  B = kiri bawah (15m Selatan, 20m Barat dari A)
-  C = kanan bawah (15m Selatan, 20m Timur dari A)
-
-Pastikan Mission Planner SITL sudah berjalan.
-Koneksi default: tcp:127.0.0.1:5762
-"""
-
+import drone
 import time
-import math
-from dronekit import connect, VehicleMode, LocationGlobalRelative
+import threading
+import signal
+import sys
+import os
 
+# PORT = '127.0.0.1:14550'
+# PORT = 'tcp:127.0.0.1:5760'  # Mission Planner default
+PORT = 'tcp:127.0.0.1:5762' # Mission Planner alternative
+# PORT = '/dev/ttyACM0' # Serial Port
 
-# --- Helper Functions ---
+emergency_landing_triggered = False
 
-def switch_mode(vehicle, mode_name, timeout=10):
-    """Berpindah mode dan menunggu konfirmasi."""
-    vehicle.mode = VehicleMode(mode_name)
-    start = time.time()
-    while vehicle.mode.name != mode_name:
-        if time.time() - start > timeout:
-            print(f"[WARN] Timeout: {mode_name}")
-            return False
-        time.sleep(0.5)
-    print(f"[MODE] {mode_name}")
-    return True
-
-
-def arm_and_takeoff(vehicle, target_altitude):
-    """Arm drone dan takeoff ke ketinggian yang ditentukan."""
-    print("[INFO] Menunggu drone siap...")
-    while not vehicle.is_armable:
+def signal_handler(signum, frame):
+    global emergency_landing_triggered
+    
+    if emergency_landing_triggered:
+        print("\n" + "!"*60)
+        print("[!!] DOUBLE Ctrl+C - FORCE TERMINATING PROGRAM")
+        print("!"*60)
+        os._exit(1)
+    
+    emergency_landing_triggered = True
+    
+    print("\n" + "!"*60)
+    print("[!] Ctrl+C DETECTED - EMERGENCY LANDING INITIATED")
+    print("!"*60)
+    print("[!] LAND mode emergency landing starting...")
+    print("[!] Press Ctrl+C AGAIN to force exit")
+    print("!"*60)
+    
+    try:
+        drone.emergency_shutdown.set()
+        drone.shutdown_event.set()
+        
+        if hasattr(drone, 'vehicle') and drone.vehicle is not None:
+            print("[!] Attempting immediate LAND mode emergency landing...")
+            
+            try:
+                if drone.emergency_land_immediate():
+                    print("[!] Emergency LAND mode successful!")
+                    time.sleep(2)
+                    sys.exit(0)
+                else:
+                    print("[!] Emergency LAND failed - using enhanced failsafe")
+                    drone.enhanced_fail_safe()
+            except Exception as e:
+                print(f"[!] Emergency landing error: {e}")
+                print("[!] Falling back to enhanced failsafe...")
+                drone.enhanced_fail_safe()
+                
+        else:
+            print("[!] No vehicle connected - safe to exit")
+            
+    except Exception as e:
+        print(f"[!] Critical error during emergency: {e}")
+        print("[!] Force terminating...")
+    finally:
+        print("[!] Emergency procedure completed - program terminating")
         time.sleep(1)
-    switch_mode(vehicle, "GUIDED")
-    vehicle.armed = True
-    while not vehicle.armed:
-        time.sleep(1)
-    print("[INFO] Drone ter-arm")
-    vehicle.simple_takeoff(target_altitude)
-    while True:
-        alt = vehicle.location.global_relative_frame.alt
-        print(f"  Naik... {alt:.2f}m")
-        if alt >= target_altitude * 0.95:
-            print(f"[INFO] Ketinggian {target_altitude}m tercapai")
-            break
-        time.sleep(1)
+        sys.exit(0)
 
+def safe_input(prompt):
+    global emergency_landing_triggered
+    
+    if emergency_landing_triggered:
+        return ""
+        
+    try:
+        return input(prompt)
+    except KeyboardInterrupt:
+        return ""
 
-def get_offset_location(original, d_north, d_east, alt):
-    """Hitung koordinat GPS baru dari offset meter."""
-    earth_radius = 6378137.0
-    d_lat = d_north / earth_radius
-    d_lon = d_east / (earth_radius * math.cos(math.radians(original.lat)))
-    return LocationGlobalRelative(
-        original.lat + math.degrees(d_lat),
-        original.lon + math.degrees(d_lon),
-        alt
-    )
+# ========== LOITER MISSION ==========
 
+def loiter_arm_only():
+    """LOITER Option 1: Arm only"""
+    global emergency_landing_triggered
+    
+    try:
+        print("=== [LOITER MISSION 1: ARM ONLY] ===")
+        print("[INFO] Press Ctrl+C anytime for emergency landing")
+        
+        drone.shutdown_event.clear()
+        drone.connect_drone(PORT)
+        
+        print("=== [ARMING IN GUIDED MODE] ===")
+        if not drone.arming():
+            print("Arming failed!")
+            return
+            
+        print("=== [ARMED - MONITORING 5s] ===")
+        print("[INFO] Vehicle is now ARMED - Ctrl+C will trigger emergency landing")
+        
+        for i in range(5):
+            if emergency_landing_triggered or drone.shutdown_event.is_set():
+                print("[!] Emergency landing triggered!")
+                return
+            print(f"  ... armed and ready ({i+1}/5)")
+            time.sleep(1)
+        
+        print("=== [DISARMING] ===")
+        if drone.vehicle and drone.vehicle.armed:
+            drone.vehicle.armed = False
+            print("Vehicle disarmed")
+            
+        drone.disconnect()
+        
+    except Exception as e:
+        print(f"[!] Mission error: {e}")
+        if not emergency_landing_triggered:
+            try:
+                drone.enhanced_fail_safe()
+            except Exception as fe:
+                print(f"[!] Failsafe error: {fe}")
+    finally:
+        print("=== [MISSION COMPLETED] ===")
 
-def get_distance(loc1, loc2):
-    """Hitung jarak meter antara dua titik GPS."""
-    d_lat = loc2.lat - loc1.lat
-    d_lon = loc2.lon - loc1.lon
-    return math.sqrt(d_lat ** 2 + d_lon ** 2) * 1.113195e5
+def loiter_arm_takeoff():
+    """LOITER Option 2: Arm + Takeoff 1.5m"""
+    global emergency_landing_triggered
+    TAKEOFF_ALT = 1.5
+    
+    try:
+        print("=== [LOITER MISSION 2: ARM + TAKEOFF] ===")
+        print("[INFO] Press Ctrl+C anytime for emergency landing")
+        
+        drone.shutdown_event.clear()
+        drone.connect_drone(PORT)
+        
+        print("=== [TAKEOFF - LOITER MODE] ===")
+        if not drone.takeoff_loiter(TAKEOFF_ALT):
+            return
+            
+        if not drone.start_giving_thrust():
+            return
+        
+        print(f"[INFO] Flying at {TAKEOFF_ALT}m - Ctrl+C will emergency land")
+        
+        print("=== [HOVERING 5s] ===")
+        for i in range(5):
+            if emergency_landing_triggered or drone.shutdown_event.is_set():
+                print("[!] Emergency landing triggered!")
+                return
+            print(f"  ... hovering at {TAKEOFF_ALT}m ({i+1}/5)")
+            time.sleep(1)
+        
+        print("=== [NORMAL LANDING] ===")
+        drone.stop_giving_thrust()
+        drone.landing_disconnect()
+        
+    except Exception as e:
+        print(f"[!] Mission error: {e}")
+        if not emergency_landing_triggered:
+            try:
+                drone.enhanced_fail_safe()
+            except Exception as fe:
+                print(f"[!] Failsafe error: {fe}")
+    finally:
+        print("=== [MISSION COMPLETED] ===")
 
+def loiter_arm_takeoff_forward():
+    """LOITER Option 3: Arm + Takeoff + Forward 3m"""
+    global emergency_landing_triggered
+    TAKEOFF_ALT = 1.5
+    FORWARD_DIST = 3
+    
+    try:
+        print("=== [LOITER MISSION 3: ARM + TAKEOFF + FORWARD] ===")
+        print("[INFO] Press Ctrl+C anytime for emergency landing")
+        
+        drone.shutdown_event.clear()
+        drone.connect_drone(PORT)
+        
+        print("=== [TAKEOFF - LOITER MODE] ===")
+        if not drone.takeoff_loiter(TAKEOFF_ALT):
+            return
+            
+        if not drone.start_giving_thrust():
+            return
+        
+        print(f"=== [MOVING FORWARD {FORWARD_DIST}m] ===")
+        print("[INFO] Moving forward - Ctrl+C will emergency land")
+        
+        if emergency_landing_triggered or drone.shutdown_event.is_set():
+            return
+            
+        drone.move_forward_loiter(FORWARD_DIST, speed=1420)
+        
+        if emergency_landing_triggered or drone.shutdown_event.is_set():
+            return
+        
+        print("=== [HOVERING 3s] ===")
+        for i in range(3):
+            if emergency_landing_triggered or drone.shutdown_event.is_set():
+                print("[!] Emergency landing triggered!")
+                return
+            print(f"  ... hovering ({i+1}/3)")
+            time.sleep(1)
+        
+        print("=== [NORMAL LANDING] ===")
+        drone.stop_giving_thrust()
+        drone.landing_disconnect()
+        
+    except Exception as e:
+        print(f"[!] Mission error: {e}")
+        if not emergency_landing_triggered:
+            try:
+                drone.enhanced_fail_safe()
+            except Exception as fe:
+                print(f"[!] Failsafe error: {fe}")
+    finally:
+        print("=== [MISSION COMPLETED] ===")
 
-def fly_to(vehicle, d_north, d_east, altitude, label, threshold=1.5):
-    """Terbang ke titik offset dalam mode GUIDED dan tunggu hingga tiba."""
-    if vehicle.mode.name != "GUIDED":
-        switch_mode(vehicle, "GUIDED")
-    current = vehicle.location.global_relative_frame
-    target = get_offset_location(current, d_north, d_east, altitude)
-    print(f"[NAV] Menuju {label}...")
-    vehicle.simple_goto(target)
-    while True:
-        dist = get_distance(vehicle.location.global_relative_frame, target)
-        alt = vehicle.location.global_relative_frame.alt
-        print(f"  Jarak ke {label}: {dist:.1f}m | Alt: {alt:.2f}m")
-        if dist <= threshold:
-            print(f"[NAV] Tiba di {label}")
-            break
-        time.sleep(1)
+def loiter_arm_takeoff_forward_turn():
+    """LOITER Option 4: Arm + Takeoff + Forward + Turn Right + Hover"""
+    global emergency_landing_triggered
+    TAKEOFF_ALT = 1.5
+    FORWARD_DIST = 3
+    
+    try:
+        print("=== [LOITER MISSION 4: ARM + TAKEOFF + FORWARD + TURN RIGHT] ===")
+        print("[INFO] Press Ctrl+C anytime for emergency landing")
+        
+        drone.shutdown_event.clear()
+        drone.connect_drone(PORT)
+        
+        print("=== [TAKEOFF - LOITER MODE] ===")
+        if not drone.takeoff_loiter(TAKEOFF_ALT):
+            return
+        if not drone.start_giving_thrust():
+            return
+        
+        print(f"=== [MOVING FORWARD {FORWARD_DIST}m] ===")
+        if emergency_landing_triggered or drone.shutdown_event.is_set():
+            return
+        drone.move_forward_loiter(FORWARD_DIST, speed=1420)
+        
+        print("=== [HOVERING 5s BEFORE TURN] ===")
+        for i in range(5):
+            if emergency_landing_triggered or drone.shutdown_event.is_set():
+                print("[!] Emergency landing triggered!")
+                return
+            print(f"  ... hovering before turn ({i+1}/5)")
+            time.sleep(1)
+        
+        print("=== [TURN RIGHT 90°] ===")
+        if emergency_landing_triggered or drone.shutdown_event.is_set():
+            return
+        drone.turn_right_loiter(90, speed=1550)
+        
+        print("=== [HOVERING 5s AFTER TURN] ===")
+        for i in range(5):
+            if emergency_landing_triggered or drone.shutdown_event.is_set():
+                print("[!] Emergency landing triggered!")
+                return
+            print(f"  ... hovering after turn ({i+1}/5)")
+            time.sleep(1)
+        
+        print("=== [NORMAL LANDING] ===")
+        drone.stop_giving_thrust()
+        drone.landing_disconnect()
+        
+    except Exception as e:
+        print(f"[!] Mission error: {e}")
+        if not emergency_landing_triggered:
+            try:
+                drone.enhanced_fail_safe()
+            except Exception as fe:
+                print(f"[!] Failsafe error: {fe}")
+    finally:
+        print("=== [MISSION COMPLETED] ===")
 
+def loiter_arm_takeoff_forward_turn_forward():
+    """LOITER Option 5: Arm + Takeoff + Forward + Turn Right + Forward 2m"""
+    global emergency_landing_triggered
+    TAKEOFF_ALT = 1.5
+    FORWARD_DIST1 = 3
+    FORWARD_DIST2 = 2
+    
+    try:
+        print("=== [LOITER MISSION 5: FULL SEQUENCE] ===")
+        print("[INFO] Press Ctrl+C anytime for emergency landing")
+        
+        drone.shutdown_event.clear()
+        drone.connect_drone(PORT)
+        
+        print("=== [TAKEOFF - LOITER MODE] ===")
+        if not drone.takeoff_loiter(TAKEOFF_ALT):
+            return
+        if not drone.start_giving_thrust():
+            return
+        
+        print(f"=== [MOVING FORWARD {FORWARD_DIST1}m] ===")
+        if emergency_landing_triggered or drone.shutdown_event.is_set():
+            return
+        drone.move_forward_loiter(FORWARD_DIST1, speed=1420)
+        
+        print("=== [HOVERING 3s] ===")
+        for i in range(3):
+            if emergency_landing_triggered or drone.shutdown_event.is_set():
+                print("[!] Emergency landing triggered!")
+                return
+            print(f"  ... hover ({i+1}/3)")
+            time.sleep(1)
+        
+        print("=== [TURN RIGHT 90°] ===")
+        if emergency_landing_triggered or drone.shutdown_event.is_set():
+            return
+        drone.turn_right_loiter(90, speed=1550)
+        
+        print("=== [HOVERING 3s] ===")
+        for i in range(3):
+            if emergency_landing_triggered or drone.shutdown_event.is_set():
+                print("[!] Emergency landing triggered!")
+                return
+            print(f"  ... hover ({i+1}/3)")
+            time.sleep(1)
+        
+        print(f"=== [MOVING FORWARD {FORWARD_DIST2}m] ===")
+        if emergency_landing_triggered or drone.shutdown_event.is_set():
+            return
+        drone.move_forward_loiter(FORWARD_DIST2, speed=1420)
+        
+        print("=== [HOVERING 3s] ===")
+        for i in range(3):
+            if emergency_landing_triggered or drone.shutdown_event.is_set():
+                print("[!] Emergency landing triggered!")
+                return
+            print(f"  ... final hover ({i+1}/3)")
+            time.sleep(1)
+        
+        print("=== [NORMAL LANDING] ===")
+        drone.stop_giving_thrust()
+        drone.landing_disconnect()
+        
+    except Exception as e:
+        print(f"[!] Mission error: {e}")
+        if not emergency_landing_triggered:
+            try:
+                drone.enhanced_fail_safe()
+            except Exception as fe:
+                print(f"[!] Failsafe error: {fe}")
+    finally:
+        print("=== [MISSION COMPLETED] ===")
 
-def loiter_at_current(vehicle, duration, label=""):
-    """
-    Beralih ke mode LOITER dan hover di posisi saat ini selama durasi tertentu.
+# ========== INDOOR MISSIONS ==========
 
-    Parameter:
-        vehicle  : objek Vehicle DroneKit
-        duration : int - durasi hover dalam detik
-        label    : str - nama titik untuk log
-    """
-    switch_mode(vehicle, "LOITER")
-    pos = vehicle.location.global_relative_frame
-    print(f"[LOITER] Hover di {label if label else 'posisi saat ini'} selama {duration}s")
-    print(f"  Posisi terkunci: lat={pos.lat:.6f}, lon={pos.lon:.6f}, alt={pos.alt:.2f}m")
+def indoor_arm_only():
+    """INDOOR Option 1: Arm only"""
+    global emergency_landing_triggered
+    
+    try:
+        print("=== [INDOOR MISSION 1: ARM ONLY] ===")
+        print("[INFO] Press Ctrl+C anytime for emergency landing")
+        
+        drone.shutdown_event.clear()
+        drone.connect_drone(PORT)
+        
+        print("=== [ARMING IN ALT_HOLD MODE] ===")
+        if not drone.arming_althold():
+            print("ALT_HOLD arming failed!")
+            return
+            
+        print("=== [ARMED - MONITORING 5s] ===")
+        for i in range(5):
+            if emergency_landing_triggered or drone.shutdown_event.is_set():
+                print("[!] Emergency landing triggered!")
+                return
+            print(f"  ... armed and ready in ALT_HOLD ({i+1}/5)")
+            time.sleep(1)
+        
+        print("=== [DISARMING] ===")
+        if drone.vehicle and drone.vehicle.armed:
+            drone.vehicle.armed = False
+            print("Vehicle disarmed")
+            
+        drone.disconnect()
+        
+    except Exception as e:
+        print(f"[!] Mission error: {e}")
+        if not emergency_landing_triggered:
+            try:
+                drone.enhanced_fail_safe()
+            except Exception as fe:
+                print(f"[!] Failsafe error: {fe}")
+    finally:
+        print("=== [MISSION COMPLETED] ===")
 
-    for i in range(duration, 0, -1):
-        alt = vehicle.location.global_relative_frame.alt
-        print(f"  {i}s tersisa | Alt: {alt:.2f}m")
-        time.sleep(1)
+def indoor_arm_takeoff():
+    """INDOOR Option 2: Arm + Takeoff 1.5m (time-based)"""
+    global emergency_landing_triggered
+    TAKEOFF_ALT = 1.5
+    
+    try:
+        print("=== [INDOOR MISSION 2: ARM + TAKEOFF] ===")
+        print("[INFO] Press Ctrl+C anytime for emergency landing")
+        
+        drone.shutdown_event.clear()
+        drone.connect_drone(PORT)
+        
+        print("=== [TAKEOFF - ALT_HOLD MODE] ===")
+        if not drone.takeoff_indoor(TAKEOFF_ALT):
+            return
+        
+        if not drone.start_giving_thrust():
+            return
+            
+        print(f"[INFO] Flying at {TAKEOFF_ALT}m - Ctrl+C will emergency land")
+        
+        print("=== [HOVERING 5s] ===")
+        for i in range(5):
+            if emergency_landing_triggered or drone.shutdown_event.is_set():
+                print("[!] Emergency landing triggered!")
+                return
+            print(f"  ... hovering at {TAKEOFF_ALT}m ({i+1}/5)")
+            time.sleep(1)
+        
+        print("=== [LANDING] ===")
+        drone.stop_giving_thrust()
+        drone.landing_disconnect()
+        
+    except Exception as e:
+        print(f"[!] Mission error: {e}")
+        if not emergency_landing_triggered:
+            try:
+                drone.enhanced_fail_safe()
+            except Exception as fe:
+                print(f"[!] Failsafe error: {fe}")
+    finally:
+        print("=== [MISSION COMPLETED] ===")
 
-    print(f"[LOITER] Selesai di {label}")
+def indoor_arm_takeoff_forward():
+    """INDOOR Option 3: Arm + Takeoff + Forward 3s"""
+    global emergency_landing_triggered
+    TAKEOFF_ALT = 1.5
+    FORWARD_TIME = 3
+    
+    try:
+        print("=== [INDOOR MISSION 3: ARM + TAKEOFF + FORWARD] ===")
+        print("[INFO] Press Ctrl+C anytime for emergency landing")
+        
+        drone.shutdown_event.clear()
+        drone.connect_drone(PORT)
+        
+        print("=== [TAKEOFF - ALT_HOLD MODE] ===")
+        if not drone.takeoff_indoor(TAKEOFF_ALT):
+            return
+            
+        if not drone.start_giving_thrust():
+            return
+        
+        print("=== [HOVERING 3s] ===")
+        if emergency_landing_triggered or drone.shutdown_event.is_set():
+            return
+        drone.hover_indoor_time(3.0)
+        
+        print(f"=== [MOVING FORWARD {FORWARD_TIME}s] ===")
+        if emergency_landing_triggered or drone.shutdown_event.is_set():
+            return
+            
+        drone.move_forward_indoor_time(FORWARD_TIME, speed=1420)
+        
+        print("=== [HOVERING 3s] ===")
+        if emergency_landing_triggered or drone.shutdown_event.is_set():
+            return
+        drone.hover_indoor_time(3.0)
+        
+        print("=== [LANDING] ===")
+        drone.stop_giving_thrust()
+        drone.landing_disconnect()
+        
+    except Exception as e:
+        print(f"[!] Mission error: {e}")
+        if not emergency_landing_triggered:
+            try:
+                drone.enhanced_fail_safe()
+            except Exception as fe:
+                print(f"[!] Failsafe error: {fe}")
+    finally:
+        print("=== [MISSION COMPLETED] ===")
 
+def indoor_arm_takeoff_forward_turn():
+    """INDOOR Option 4: Arm + Takeoff + Forward + Turn Right + Hover"""
+    global emergency_landing_triggered
+    TAKEOFF_ALT = 1.5
+    FORWARD_TIME = 3
+    TURN_TIME = 2
+    
+    try:
+        print("=== [INDOOR MISSION 4: ARM + TAKEOFF + FORWARD + TURN] ===")
+        print("[INFO] Press Ctrl+C anytime for emergency landing")
+        
+        drone.shutdown_event.clear()
+        drone.connect_drone(PORT)
+        
+        print("=== [TAKEOFF - ALT_HOLD MODE] ===")
+        if not drone.takeoff_indoor(TAKEOFF_ALT):
+            return
+        
+        if not drone.start_giving_thrust():
+            return
+        
+        print(f"=== [MOVING FORWARD {FORWARD_TIME}s] ===")
+        if emergency_landing_triggered or drone.shutdown_event.is_set():
+            return
+        drone.move_forward_indoor_time(FORWARD_TIME, speed=1420)
+        
+        print("=== [HOVERING 5s BEFORE TURN] ===")
+        if emergency_landing_triggered or drone.shutdown_event.is_set():
+            return
+        drone.hover_indoor_time(5.0)
+        
+        print(f"=== [TURN RIGHT {TURN_TIME}s] ===")
+        if emergency_landing_triggered or drone.shutdown_event.is_set():
+            return
+        drone.turn_right_indoor_time(TURN_TIME, speed=1550)
+        
+        print("=== [HOVERING 5s AFTER TURN] ===")
+        if emergency_landing_triggered or drone.shutdown_event.is_set():
+            return
+        drone.hover_indoor_time(5.0)
+        
+        print("=== [LANDING] ===")
+        drone.stop_giving_thrust()
+        drone.landing_disconnect()
+        
+    except Exception as e:
+        print(f"[!] Mission error: {e}")
+        if not emergency_landing_triggered:
+            try:
+                drone.enhanced_fail_safe()
+            except Exception as fe:
+                print(f"[!] Failsafe error: {fe}")
+    finally:
+        print("=== [MISSION COMPLETED] ===")
 
-# --- Main Program ---
+def indoor_arm_takeoff_forward_turn_forward():
+    """INDOOR Option 5: Arm + Takeoff + Forward + Turn Right + Forward 2s"""
+    global emergency_landing_triggered
+    TAKEOFF_ALT = 1.5
+    FORWARD_TIME1 = 3
+    TURN_TIME = 2
+    FORWARD_TIME2 = 2
+    
+    try:
+        print("=== [INDOOR MISSION 5: FULL SEQUENCE] ===")
+        print("[INFO] Press Ctrl+C anytime for emergency landing")
+        
+        drone.shutdown_event.clear()
+        drone.connect_drone(PORT)
+        
+        print("=== [TAKEOFF - ALT_HOLD MODE] ===")
+        if not drone.takeoff_indoor(TAKEOFF_ALT):
+            return
+        
+        if not drone.start_giving_thrust():
+            return
+        
+        print(f"=== [MOVING FORWARD {FORWARD_TIME1}s] ===")
+        if emergency_landing_triggered or drone.shutdown_event.is_set():
+            return
+        drone.move_forward_indoor_time(FORWARD_TIME1, speed=1420)
+        
+        print(f"=== [TURN RIGHT {TURN_TIME}s] ===")
+        if emergency_landing_triggered or drone.shutdown_event.is_set():
+            return
+        drone.turn_right_indoor_time(TURN_TIME, speed=1550)
+        
+        print(f"=== [MOVING FORWARD {FORWARD_TIME2}s] ===")
+        if emergency_landing_triggered or drone.shutdown_event.is_set():
+            return
+        drone.move_forward_indoor_time(FORWARD_TIME2, speed=1420)
+        
+        print("=== [HOVERING 3s] ===")
+        if emergency_landing_triggered or drone.shutdown_event.is_set():
+            return
+        drone.hover_indoor_time(3.0)
+        
+        print("=== [LANDING] ===")
+        drone.stop_giving_thrust()
+        drone.landing_disconnect()
+        
+    except Exception as e:
+        print(f"[!] Mission error: {e}")
+        if not emergency_landing_triggered:
+            try:
+                drone.enhanced_fail_safe()
+            except Exception as fe:
+                print(f"[!] Failsafe error: {fe}")
+    finally:
+        print("=== [MISSION COMPLETED] ===")
 
-FLIGHT_ALTITUDE = 12
-LOITER_DURATION = 10  # detik hover di setiap titik
+# ========== UTILITY FUNCTIONS ==========
 
-print("=" * 55)
-print("  04 Loiter Mission - Pola Segitiga")
-print(f"  Ketinggian: {FLIGHT_ALTITUDE}m | Hover per titik: {LOITER_DURATION}s")
-print("=" * 55)
+def show_safety_info():
+    """Show comprehensive safety information"""
+    print("="*70)
+    print("EMERGENCY LANDING SYSTEM")
+    print("="*70)
+    print("• Press Ctrl+C ONCE for emergency landing")
+    print("• Press Ctrl+C TWICE for force exit")
+    print("• Emergency landing works during any flight phase")
+    print("• Pilot can always override via remote control")
+    print("• LOITER mode requires GPS lock")
+    print("• INDOOR mode works tanpa GPS (ALT_HOLD)")
+    print("="*70)
 
-print("""
-  Pola terbang (Segitiga):
-      Start/Landing
-           |
-           A  (30m Utara)
-          / \\
-         B   C
-  (15m S, 20m W dari A)  (15m S, 20m E dari A)
-""")
+def show_loiter_menu():
+    """Show LOITER mode menu"""
+    print("\n" + "="*50)
+    print("LOITER MODE MISSIONS (OUTDOOR - GPS REQUIRED)")
+    print("="*50)
+    print("1. Arm only")
+    print("2. Arm + Takeoff 1.5m")
+    print("3. Arm + Takeoff + Forward 3m")
+    print("4. Arm + Takeoff + Forward + Turn Right + Hover")
+    print("5. Arm + Takeoff + Forward + Turn Right + Forward 2m")
+    print("="*50)
+    print("[INFO] Ctrl+C will emergency land at any time")
 
-print("[1] Koneksi ke SITL...")
-vehicle = connect('tcp:127.0.0.1:5762', wait_ready=True)
-print(f"    Terhubung. Mode: {vehicle.mode.name}")
+def show_indoor_menu():
+    """Show INDOOR mode menu"""
+    print("\n" + "="*50)
+    print("INDOOR MODE MISSIONS (ALT_HOLD - NO GPS)")
+    print("="*50)
+    print("1. Arm only")
+    print("2. Arm + Takeoff 1.5m")
+    print("3. Arm + Takeoff + Forward 3s")
+    print("4. Arm + Takeoff + Forward + Turn Right + Hover")
+    print("5. Arm + Takeoff + Forward + Turn Right + Forward 2s")
+    print("="*50)
+    print("[INFO] Ctrl+C will emergency land at any time")
 
-print(f"\n[2] Arm dan Takeoff ke {FLIGHT_ALTITUDE}m...")
-arm_and_takeoff(vehicle, target_altitude=FLIGHT_ALTITUDE)
+def run_loiter_mission(choice):
+    """Execute LOITER mission based on choice"""
+    missions = {
+        "1": loiter_arm_only,
+        "2": loiter_arm_takeoff,
+        "3": loiter_arm_takeoff_forward,
+        "4": loiter_arm_takeoff_forward_turn,
+        "5": loiter_arm_takeoff_forward_turn_forward
+    }
+    
+    if choice in missions:
+        missions[choice]()
+    else:
+        print("Invalid choice! Running default: Arm only")
+        loiter_arm_only()
 
-# Titik A: puncak segitiga, 30m ke utara dari start
-print("\n[3] Menuju Titik A (puncak)...")
-fly_to(vehicle, d_north=30, d_east=0, altitude=FLIGHT_ALTITUDE, label="Titik A")
-loiter_at_current(vehicle, LOITER_DURATION, label="Titik A")
+def run_indoor_mission(choice):
+    """Execute INDOOR mission based on choice"""
+    missions = {
+        "1": indoor_arm_only,
+        "2": indoor_arm_takeoff,
+        "3": indoor_arm_takeoff_forward,
+        "4": indoor_arm_takeoff_forward_turn,
+        "5": indoor_arm_takeoff_forward_turn_forward
+    }
+    
+    if choice in missions:
+        missions[choice]()
+    else:
+        print("Invalid choice! Running default: Arm only")
+        indoor_arm_only()
 
-# Titik B: sudut kiri bawah, 15m selatan dan 20m barat dari A
-print("\n[4] Menuju Titik B (kiri)...")
-fly_to(vehicle, d_north=-15, d_east=-20, altitude=FLIGHT_ALTITUDE, label="Titik B")
-loiter_at_current(vehicle, LOITER_DURATION, label="Titik B")
+# ========== MAIN PROGRAM ==========
 
-# Titik C: sudut kanan bawah, lurus 40m ke timur dari B
-print("\n[5] Menuju Titik C (kanan)...")
-fly_to(vehicle, d_north=0, d_east=40, altitude=FLIGHT_ALTITUDE, label="Titik C")
-loiter_at_current(vehicle, LOITER_DURATION, label="Titik C")
-
-# Kembali ke sekitar titik start
-print("\n[6] Kembali ke titik awal...")
-fly_to(vehicle, d_north=15, d_east=-20, altitude=FLIGHT_ALTITUDE, label="Titik Start")
-time.sleep(2)
-
-# Landing
-print("\n[7] Landing...")
-switch_mode(vehicle, "LAND")
-while vehicle.location.global_relative_frame.alt > 0.2:
-    print(f"  Mendarat... {vehicle.location.global_relative_frame.alt:.2f}m")
-    time.sleep(1)
-
-print("\n[DONE] Misi segitiga dengan LOITER selesai.")
-print(f"  Rute: Takeoff -> A [LOITER] -> B [LOITER] -> C [LOITER] -> Landing")
-vehicle.close()
+if __name__ == "__main__":
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    show_safety_info()
+    
+    print("\nSelect flight mode:")
+    print("1. LOITER mode (Outdoor - GPS)")
+    print("2. INDOOR mode (ALT_HOLD - No GPS)")
+    
+    mode_choice = safe_input("Enter mode (1-2): ").strip()
+    
+    if emergency_landing_triggered:
+        print("Program terminated during selection")
+        sys.exit(0)
+    
+    if mode_choice == "1":
+        # LOITER MODE
+        show_loiter_menu()
+        mission_choice = safe_input("Enter LOITER mission (1-5): ").strip()
+        
+        if not emergency_landing_triggered:
+            print(f"\nExecuting LOITER mission {mission_choice}...")
+            run_loiter_mission(mission_choice)
+        
+    elif mode_choice == "2":
+        # INDOOR MODE
+        show_indoor_menu()
+        mission_choice = safe_input("Enter INDOOR mission (1-5): ").strip()
+        
+        if not emergency_landing_triggered:
+            print(f"\nExecuting INDOOR mission {mission_choice}...")
+            run_indoor_mission(mission_choice)
+        
+    else:
+        if not emergency_landing_triggered:
+            print("Invalid mode selection!")
+            print("Running default: LOITER mode, Arm only...")
+            loiter_arm_only()
+    
+    if not emergency_landing_triggered:
+        print("\n" + "="*60)
+        print("MISSION PROGRAM COMPLETED SUCCESSFULLY")
+        print("="*60)
