@@ -1,3 +1,5 @@
+Vidio Simulasi hasil code: https://drive.google.com/file/d/1_Wg_xNusVW3OjkoukVI2iGbH3heFAZXp/view?usp=sharing 
+
 1. Apa pola terbang yang dibuat? Deskripsikan rutenya.
 
 Pola terbang yang saya buat adalah horizontal lawnmower pattern (pola sapuan bolak-balik horizontal) yang umum digunakan pada drone pertanian untuk penyemprotan atau pemupukan lahan.Lahan yang digunakan berukuran 40 meter (panjang) × 10 meter (lebar) dengan jarak antar baris (spacing) sebesar 4 meter dan ketinggian terbang konstan 3 meter. Rute penerbangan dilakukan sebagai berikut:
